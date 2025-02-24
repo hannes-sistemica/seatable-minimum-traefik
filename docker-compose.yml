@@ -1,0 +1,143 @@
+version: '3.8'
+
+services:
+  seatable-server:
+    image: seatable/seatable-enterprise:5.1.9
+    restart: unless-stopped
+    container_name: seatable-server
+    volumes:
+      - "/opt/seatable-server:/shared"
+      - type: bind
+        source: "./seatable-license.txt"
+        target: "/shared/seatable/seatable-license.txt"
+        read_only: true
+    environment:
+      - DB_HOST=mariadb
+      - DB_ROOT_PASSWD=${SEATABLE_MYSQL_ROOT_PASSWORD}
+      - SEATABLE_SERVER_HOSTNAME=${SEATABLE_SERVER_HOSTNAME}
+      - SEATABLE_SERVER_PROTOCOL=https
+      - SEATABLE_ADMIN_EMAIL=${SEATABLE_ADMIN_EMAIL}
+      - SEATABLE_ADMIN_PASSWORD=${SEATABLE_ADMIN_PASSWORD}
+      - TIME_ZONE=${TIME_ZONE}
+      - REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+      # Email settings (optional)
+      - SEATABLE_EMAIL_USE_TLS=${SEATABLE_EMAIL_USE_TLS:-}
+      - SEATABLE_EMAIL_HOST=${SEATABLE_EMAIL_HOST:-}
+      - SEATABLE_EMAIL_HOST_USER=${SEATABLE_EMAIL_HOST_USER:-}
+      - SEATABLE_EMAIL_HOST_PASSWORD=${SEATABLE_EMAIL_HOST_PASSWORD:-}
+      - SEATABLE_EMAIL_PORT=${SEATABLE_EMAIL_PORT:-}
+      - SEATABLE_DEFAULT_FROM_EMAIL=${SEATABLE_DEFAULT_FROM_EMAIL:-}
+      - SEATABLE_SERVER_EMAIL=${SEATABLE_SERVER_EMAIL:-}
+      # Optional Python scheduler settings
+      - PYTHON_SCHEDULER_URL=${PYTHON_SCHEDULER_URL:-}
+      - PYTHON_SCHEDULER_AUTH_TOKEN=${PYTHON_SCHEDULER_AUTH_TOKEN:-}
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.seatable.rule=Host(`${SEATABLE_SERVER_HOSTNAME}`)"
+      - "traefik.http.routers.seatable.entrypoints=websecure"
+      - "traefik.http.routers.seatable.tls=true"
+      - "traefik.http.routers.seatable.tls.certresolver=letsencrypt"
+      - "traefik.http.services.seatable.loadbalancer.server.port=80"
+      # Security Headers
+      - "traefik.http.middlewares.seatable-headers.headers.stsSeconds=31536000"
+      - "traefik.http.middlewares.seatable-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.seatable-headers.headers.stsPreload=true"
+      - "traefik.http.middlewares.seatable-headers.headers.referrerPolicy=same-origin"
+      - "traefik.http.middlewares.seatable-headers.headers.browserXssFilter=true"
+      - "traefik.http.middlewares.seatable-headers.headers.contentTypeNosniff=true"
+      - "traefik.http.middlewares.seatable-headers.headers.frameDeny=true"
+      - "traefik.http.middlewares.seatable-headers.headers.customResponseHeaders.Set-Cookie=(.*) $1; SameSite=None; Secure"
+      - "traefik.http.routers.seatable.middlewares=seatable-headers"
+    networks:
+      - traefik-network
+      - backend-seatable-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://localhost:8000 || exit 1"]
+      interval: 20s
+      retries: 3
+      start_period: 30s
+      timeout: 10s
+
+  mariadb:
+    image: mariadb:11.4.3-noble
+    restart: unless-stopped
+    container_name: mariadb
+    environment:
+      - MYSQL_ROOT_PASSWORD=${SEATABLE_MYSQL_ROOT_PASSWORD}
+      - MYSQL_LOG_CONSOLE=true
+      - MARIADB_AUTO_UPGRADE=1
+      - TZ=${TIME_ZONE}
+    volumes:
+      - "/opt/mariadb:/var/lib/mysql"
+    networks:
+      - backend-seatable-net
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/usr/local/bin/healthcheck.sh",
+          "--connect",
+          "--mariadbupgrade",
+          "--innodb_initialized",
+        ]
+      interval: 20s
+      retries: 3
+      start_period: 30s
+      timeout: 10s
+
+  redis:
+    image: redis:7.2.6-bookworm
+    restart: unless-stopped
+    container_name: redis
+    networks:
+      - backend-seatable-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 20s
+      retries: 3
+      timeout: 5s
+
+  # (Optional) Python components for the pipeline, uncomment if needed
+  # python-scheduler:
+  #   image: seatable/seatable-python-scheduler:4.1.2
+  #   restart: unless-stopped
+  #   container_name: python-scheduler
+  #   environment:
+  #     - TIME_ZONE=${TIME_ZONE}
+  #     - DB_HOST=mariadb
+  #     - DB_ROOT_PASSWD=${SEATABLE_MYSQL_ROOT_PASSWORD}
+  #     - PYTHON_SCHEDULER_AUTH_TOKEN=${PYTHON_SCHEDULER_AUTH_TOKEN}
+  #     - SEATABLE_SERVER_URL=https://${SEATABLE_SERVER_HOSTNAME}
+  #     - PYTHON_STARTER_URL=http://python-starter:8080
+  #   networks:
+  #     - traefik-network
+  #     - backend-seatable-net
+  #     - backend-scheduler-net
+
+  # python-starter:
+  #   image: seatable/seatable-python-starter:4.1.2
+  #   restart: unless-stopped
+  #   container_name: python-starter
+  #   volumes:
+  #     - "/var/run/docker.sock:/var/run/docker.sock"
+  #     - "${PYTHON_TRANSFER_DIRECTORY_PATH:-/tmp}:${PYTHON_TRANSFER_DIRECTORY_PATH:-/tmp}"
+  #   environment:
+  #     - PYTHON_SCHEDULER_URL=http://python-scheduler
+  #     - PYTHON_TRANSFER_DIRECTORY=${PYTHON_TRANSFER_DIRECTORY_PATH:-/tmp}
+  #     - PYTHON_RUNNER_IMAGE=seatable/seatable-python-runner:4.1.2
+  #   networks:
+  #     - backend-scheduler-net
+
+networks:
+  traefik-network:
+    external: true
+  backend-seatable-net:
+    name: backend-seatable-net
+  # Only needed if using the python components
+  # backend-scheduler-net:
+  #   name: backend-scheduler-net
